@@ -15,6 +15,7 @@ import time
 import datetime
 from pprint import pprint
 import pickle
+from collections import defaultdict
 
 
 logger = logging.getLogger('ranpad2')
@@ -25,9 +26,7 @@ def init_directories():
 
     # Define output directory
     timestamp = strftime('%m%d_%H%M%S')
-    output_dir = join(ct.RESULTS_DIR, 'ranpad2_'+timestamp)
-    # run_label = f"front_{client_dummy_pkt_num}_{server_dummy_pkt_num}_{start_padding_time}_{int(max_wnd)}"
-    # output_dir = join(ct.RESULTS_DIR, run_label)
+    output_dir = join(ct.RESULTS_DIR, 'cc_front'+timestamp)
     makedirs(output_dir)
 
     return output_dir
@@ -50,7 +49,6 @@ def parse_arguments():
 
     conf_parser = configparser.RawConfigParser()
     conf_parser.read(ct.CONFIG_FILE)
-
 
     parser = argparse.ArgumentParser(description='It simulates adaptive padding on a set of web traffic traces.')
 
@@ -99,11 +97,6 @@ def parse_arguments():
     return args,config
 
 def load_trace(fdir, trace_id):
-    # with open(fdir,'r') as f:
-    #     tmp = f.readlines()
-    # t = pd.Series(tmp).str.slice(0,-1).str.split('\t',expand = True).astype('float')
-    # return np.array(t)
-
     site_id = int(os.path.basename(fdir).split('_')[1])
     with open(fdir, 'rb') as f:
         site_data = pickle.load(f)
@@ -123,14 +116,6 @@ def dump(trace, fname):
                 + ct.NL)
 
 def simulate(finfo):
-    # print(fdir)
-    # if not os.path.exists(fdir):
-    #     return
-    # else:
-    #     print(fdir,"file exists")
-    #print(fdir)
-    # logger.debug("Simulating trace {}".format(fdir))
-
     fdir, trace_id = finfo
     if not os.path.exists(fdir):
         print(f"Missing: {fdir}")
@@ -145,6 +130,9 @@ def simulate(finfo):
     # print("trace",trace)
     fname = f'site_{site_id}_trace_{trace_id}.txt'
     dump(padded_trace, fname)
+
+    padded_signed = convert_to_signed_trace(padded_trace)
+    return site_id, (trace_id, padded_signed)
 
 def RP(trace):
     # format: [[time, pkt],[...]]
@@ -195,21 +183,12 @@ def RP(trace):
     #this may cut off packets
     client_timetable = client_timetable[np.where(start_padding_time+client_timetable[:,0] <= last_pkt_time)]
 
-
     server_timetable = getTimestamps(server_wnd, server_dummy_pkt)
 
-    # server_timetable[:,0] += first_incoming_pkt_time ##this was here, but do we need it?
-
-
-    #this was here but it may cut off data packets
     server_timetable = server_timetable[np.where(start_padding_time+server_timetable[:,0] <= last_pkt_time)]
 
-    # if len(client_timetable) > len(server_timetable):
-    #     print(f"Difference in timetables, interest: {len(client_timetable)}, data: {len(server_timetable)}")
-
       #to ensure that we have more data packets even if some get cut off  
-
-    while len(server_timetable) <= len(client_timetable):
+    while len(server_timetable) < (len(client_timetable) + 1):
         extra_needed = len(client_timetable) - len(server_timetable) + 1
         extra_times = sorted(np.random.rayleigh(server_wnd, extra_needed))
         extra_times = np.reshape(extra_times, (len(extra_times), 1))
@@ -236,7 +215,6 @@ def RP(trace):
         dummy_interest_time = np.random.uniform(first_pkt_time, first_server_pkt_time)
 
         client_timetable = np.array([[dummy_interest_time]])
-        # print("was zero, so added", client_timetable)
 
     #if trace started with data packets, create a new interest and add it to other interests
     if client_timetable[0][0] >= first_server_pkt_time:
@@ -252,14 +230,7 @@ def RP(trace):
         client_timetable = np.vstack([client_timetable_row, client_timetable])
         # print(" new first client: ", client_timetable[0][0], "server: ", first_server_pkt_time) 
 
-
-    client_timetable[:, 0] += start_padding_time
-    server_timetable[:, 0] += start_padding_time
-
-
-
-    #was missing padding time 
-    client_pkts = np.concatenate((client_timetable, 2*np.ones((len(client_timetable),1))),axis = 1)   #check
+    client_pkts = np.concatenate((client_timetable, 2*np.ones((len(client_timetable),1))),axis = 1)  
     server_pkts = np.concatenate((server_timetable, -2*np.ones((len(server_timetable),1))),axis = 1)
 
     noisy_trace = np.concatenate( (trace, client_pkts, server_pkts), axis = 0)
@@ -276,8 +247,9 @@ def getTimestamps(wnd, num):
     return np.reshape(timestamps, (len(timestamps),1))
 
 def parallel(flist, n_jobs = 20):
-    pool = mp.Pool(n_jobs)
-    pool.map(simulate, flist)
+    with mp.Pool(n_jobs) as pool:
+        results = pool.map(simulate, flist)
+    return results
 
 def convert_to_signed_trace(trace):
     times = trace[:, 0]
@@ -307,8 +279,6 @@ if __name__ == '__main__':
 
     client_min_dummy_pkt_num = int(config.get('client_min_dummy_pkt_num',1))
 
-
-    print(f"min of interests {client_min_dummy_pkt_num}")
     server_min_dummy_pkt_num = int(config.get('server_min_dummy_pkt_num',1))
     client_dummy_pkt_num = int(config.get('client_dummy_pkt_num',300))
     server_dummy_pkt_num = int(config.get('server_dummy_pkt_num',300))
@@ -320,90 +290,61 @@ if __name__ == '__main__':
     # start_padding_time = args.start_padding_time
     # max_wnd = args.max_wnd
     min_wnd = float(config.get('min_wnd',10))
+    
+    MON_SITE_NUM = int(config.get('mon_site_num', 100))
+    MON_INST_NUM = int(config.get('mon_inst_num', 100))
 
-    # print(client_dummy_pkt_num, server_dummy_pkt_num, start_padding_time, max_wnd, min_wnd)
-    
-    # MON_SITE_NUM = int(config.get('mon_site_num', 10))
-    # MON_INST_NUM = int(config.get('mon_inst_num', 10))
-    # UNMON_SITE_NUM = int(config.get('unmon_site_num', 100))
-    # print("client_min_dummy_pkt_num:{}".format(client_min_dummy_pkt_num))
-    # print("server_min_dummy_pkt_num:{}".format(server_min_dummy_pkt_num))
-    # print("client_dummy_pkt_num: {}\nserver_dummy_pkt_num: {}".format(client_dummy_pkt_num,server_dummy_pkt_num))
-    # print("max_wnd: {}\nmin_wnd: {}".format(max_wnd,min_wnd))
-    # print("start_padding_time:", start_padding_time)
-    
     site_ids = 100
     traces_per_site = 100
     flist  = []
-    # for i in range(MON_SITE_NUM):
-    #     for j in range(MON_INST_NUM):
-    #         flist.append(join(args.p, str(i)+'-'+str(j)+args.format))
-    # for i in range(UNMON_SITE_NUM):
-    #     flist.append(join(args.p, str(i)+args.format))
-
-    # for site_id in range(site_ids):
-    #     fpath = join(args.p, f"website_{site_id}_processed{args.format}")
-    #     for trace_id in range(traces_per_site):
-    #         flist.append((fpath, trace_id))
-
 
     # Init run directories
     output_dir = init_directories()
     logger.info("Traces are dumped to {}".format(output_dir))
     start = time.time()
-    # print("flist",flist)
-    
-    # for i,f in enumerate(flist):
-    #     logger.debug('Simulating {}'.format(f))
-    #     if i %2000 == 0:
-    #         print(r"Done for inst ",i,flush = True)
-    #     simulate(f)
-    #     #break
 
-    #parallel(flist)
-    #logger.info("Time: {}".format(time.time()-start))
-
-######npz creation
-    for site_id in range(site_ids):
+    for site_id in range(MON_SITE_NUM):
         fpath = join(args.p, f"website_{site_id}_processed{args.format}")
-        # original_traces = []
-        padded_traces = []
-
         if not os.path.exists(fpath):
             print(f"File missing for site {site_id}: {fpath}")
             continue
-        
+
         with open(fpath, 'rb') as f:
             site_data = pickle.load(f)
 
         trace_list = site_data.get(site_id, [])
         trace_count = len(trace_list)
 
-        if trace_count != 100:
+        if trace_count != MON_INST_NUM:
             print(f"For site {site_id} only {trace_count}")
 
-        # for trace_id in range(trace_count):
-        #     trace, _, _ = load_trace(fpath, trace_id)
-        #     padded = RP(trace)
-
-        #     # original_signed = convert_to_signed_trace(trace)
-        #     padded_signed = convert_to_signed_trace(padded)
-
-        #     # original_traces.append(original_signed)
-        #     padded_traces.append(padded_signed)
-            
-        filepath = join(args.p, f"website_{site_id}_processed{args.format}")
         for trace_id in range(trace_count):
-            flist.append((filepath, trace_id))
-        
-        # save_traces_npz_format(site_id, padded_traces, label="front")
-        # save_traces_npz_format(site_id, original_traces, label="original")
-######npz creation
+            flist.append((fpath, trace_id))
 
-    for i,f in enumerate(flist):
+    site_traces = defaultdict(dict)
+
+    for i, f in enumerate(flist):
         logger.debug('Simulating {}'.format(f))
-        if i %2000 == 0:
-            print(r"Done for inst ",i,flush = True)
-        simulate(f)
+        if i % 2000 == 0:
+            print(f"Done for inst {i}", flush=True)
 
-    #if needed uncomment parts with "original" to transform traces to txt format 
+        result = simulate(f)
+        if result is None:
+            continue
+        site_id, (trace_id, padded_signed) = result
+        site_traces[site_id][trace_id] = padded_signed
+
+    # Save to .npz format
+    for site_id, trace_dict in site_traces.items():
+        trace_list = [trace_dict[i] for i in sorted(trace_dict.keys())]
+        save_traces_npz_format(site_id, trace_list, label="front")
+        print(f"Saved npz for site {site_id}")
+
+    #to run code, ensure that you are execution from the front directory
+    #cmd format: cc_front.py -c [config name] <traces path>
+    #to get defended perfect stable dataset: cc_front.py -c t1 "../../raw_datasets/nodef/"  
+    #to get defended perfect unstable dataset: cc_front.py -c t1 "../../raw_datasets/nodef_unstable/"  
+    #to get defended andana stable dataset: cc_front.py -c t1 "../../raw_datasets/andana/"  
+    #to get defended andana unstable dataset: cc_front.py -c t1 "../../raw_datasets/andana_unstable/"  
+    #resulting datasets will be saved into the subdirectory of the main one called "results"
+
